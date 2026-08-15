@@ -1,0 +1,60 @@
+name: announce
+# Posts newly pushed patterns to Slack #patterns as inline images.
+# Deterministic transport — no model involved. The commit message body of the
+# push becomes the text of the Slack post.
+on:
+  push:
+    branches: [main]
+    paths: ["patterns/*.png"]
+
+jobs:
+  slack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Post new patterns to Slack
+        env:
+          WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, urllib.request
+
+          before, after = os.environ["BEFORE"], os.environ["AFTER"]
+          if set(before) == {"0"}:            # first push to the branch
+              before = after + "^"
+          diff = subprocess.run(
+              ["git", "diff", "--name-only", "--diff-filter=A", before, after],
+              capture_output=True, text=True, check=True).stdout
+          new = sorted(p for p in diff.splitlines()
+                       if p.startswith("patterns/") and p.endswith(".png"))
+          if not new:
+              print("no new patterns in this push")
+              raise SystemExit(0)
+
+          msg = subprocess.run(["git", "log", "-1", "--format=%B", after],
+                               capture_output=True, text=True, check=True).stdout.strip()
+          blocks = [{"type": "section",
+                     "text": {"type": "mrkdwn", "text": msg or "new patterns"}}]
+          for p in new[:45]:                  # Slack caps a message at 50 blocks
+              name = os.path.basename(p)[:-4]
+              blocks.append({
+                  "type": "image",
+                  "image_url": f"https://raw.githubusercontent.com/heavygweit/pattern-gallery/{after}/{p}",
+                  "alt_text": name,
+                  "title": {"type": "plain_text", "text": name},
+              })
+          if len(new) > 45:
+              blocks.append({"type": "section", "text": {
+                  "type": "mrkdwn", "text": f"…and {len(new)-45} more in the repo."}})
+
+          body = json.dumps({"text": msg or "new patterns",
+                             "blocks": blocks}).encode()
+          req = urllib.request.Request(os.environ["WEBHOOK"], data=body,
+                                       headers={"Content-Type": "application/json"})
+          with urllib.request.urlopen(req, timeout=30) as r:
+              print("slack:", r.status, r.read().decode())
+          PY
